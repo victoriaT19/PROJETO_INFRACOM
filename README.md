@@ -36,7 +36,7 @@ Como o UDP não oferece garantias, foi necessário criar um conjunto de regras (
 4.  O Servidor recebe os pacotes e salva o arquivo em `armazenamento_server/recebido_[nome_do_arquivo]`.
 5.  **[Servidor -\> Cliente]:** Envia o `tamanho_total_recebido` de volta ao Cliente (atua como uma confirmação de tamanho para o eco).
 6.  **[Servidor -\> Cliente]:** Envia os `dados_do_arquivo` (lendo o arquivo que acabou de salvar) de volta ao Cliente, também em pacotes de 1024 bytes.
-7.  O Cliente recebe os dados do eco e salva o arquivo em `armazenamento_cliente/devolvido_[nome_do_arquivo]`.
+7.  O Cliente recebe os dados do retorno e salva o arquivo em `armazenamento_cliente/devolvido_[nome_do_arquivo]`.
 
 ## Estrutura de Pastas
 
@@ -44,7 +44,7 @@ Para que o projeto funcione, a seguinte estrutura de pastas deve ser criada:
 
 ```
 UDP/
-├── armazenamento_cliente/    <-- (O cliente salva o eco aqui)
+├── armazenamento_cliente/    <-- (O cliente salva o retorno aqui)
 ├── armazenamento_server/     <-- (O servidor salva o upload aqui)
 ├── client.py                 <-- (Nosso script de cliente)
 ├── server.py                 <-- (Nosso script de servidor)
