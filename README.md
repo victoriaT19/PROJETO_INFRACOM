@@ -120,9 +120,9 @@ A **Etapa 2** deste projeto focará na implementação de um **Protocolo de Tran
   - **Temporizadores (Timeouts):** Para detectar pacotes perdidos.
   - **Retransmissão:** Para reenviar pacotes perdidos ou corrompidos.
 
-## Autor
+## Autores
 
-[Victória Tauanny de Paula da Silva]
-[Gilberto Andrade Patricio]
-[Karoline Fonseca Viana]
-[Luany Bezerra dos Reis]
+- [Victória Tauanny de Paula da Silva]
+- [Gilberto Andrade Patricio]
+- [Karoline Fonseca Viana]
+- [Luany Bezerra dos Reis]
