@@ -122,7 +122,7 @@ A **Etapa 2** deste projeto focará na implementação de um **Protocolo de Tran
 
 ## Autores
 
-- [Victória Tauanny de Paula da Silva]
-- [Gilberto Andrade Patricio]
-- [Karoline Fonseca Viana]
-- [Luany Bezerra dos Reis]
+- Victória Tauanny de Paula da Silva
+- Gilberto Andrade Patricio
+- Karoline Fonseca Viana
+- Luany Bezerra dos Reis
