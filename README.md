@@ -121,7 +121,6 @@ A **Etapa 2** deste projeto focará na implementação de um **Protocolo de Tran
   - **Retransmissão:** Para reenviar pacotes perdidos ou corrompidos.
 
 # HuntCin - Terceira Etapa (Entrega 3)
-===================================
 
 ## Status do Projeto
 -----------------
