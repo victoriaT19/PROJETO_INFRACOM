@@ -4,7 +4,7 @@ Este é um projeto acadêmico para a disciplina de Infraestrutura de Comunicaç�
 
 ## Status do Projeto
 
-:warning: **Esta é a Etapa 1 do projeto.**
+:warning: **Etapa 1 do projeto.**
 
 O foco desta etapa é implementar a transferência básica de um arquivo do Cliente para o Servidor, e a devolução (retorno) do Servidor de volta ao Cliente.
 
