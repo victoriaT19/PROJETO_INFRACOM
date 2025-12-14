@@ -154,10 +154,12 @@ rodando em linha de comando com comunicação UDP e transmissão confiável impl
 
 ## Estrutura de pastas 
 -------------------------------------
-UDP/
+```
+HuntCin/
 ├── client.py
 ├── server.py
 └── README.md
+```
 
 ## Como usar (execução local / testes)
 -----------------------------------
