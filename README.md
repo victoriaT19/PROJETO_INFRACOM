@@ -141,7 +141,7 @@ rodando em linha de comando com comunicação UDP e transmissão confiável impl
 - Login / logout com nomes únicos (não aceitamos nomes duplicados).
 - Grid 3x3. Posição inicial de todos: (1,1).
 - Tesouro sorteado aleatoriamente (qualquer posição exceto (1,1)).
-- Rodadas temporizadas (ROUND_TIME = 10s por padrão). Se o cliente não enviar comando dentro do tempo,
+- Rodadas temporizadas (ROUND_TIME = 30s por padrão). Se o cliente não enviar comando dentro do tempo,
   será considerado sem comando nesta rodada.
 - Comandos:
     - login <nome_do_usuario>
