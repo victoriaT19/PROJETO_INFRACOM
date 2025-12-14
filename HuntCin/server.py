@@ -7,435 +7,425 @@ Características:
  - Comandos: move <up/down/left/right>, hint, suggest.
  - Rodadas temporizadas com broadcast de início e estado.
  - RDT stop-and-wait por cliente (alternating-bit).
- - PROB_PERDA = 0 por padrão (desative simulação de perdas). Ajuste se quiser testar robustez.
 """
 
 import socket
 import threading
 import time
 import random
+import traceback
 
-# --- Configurações RDT / jogo ---
-TIMEOUT = 2.0                 # timeout para retransmissões RDT
-PROB_PERDA = 0.0              # probabilidade de perda simulada (0 = sem perda)
-BUFFER_SIZE = 2048
-ROUND_TIME = 10.0             # tempo de cada rodada (segundos)
-GRID_W, GRID_H = 3, 3         # grid 3x3
-START_POS = (1, 1)            # posição inicial (1,1) canto inferior esquerdo
+# --- Configurações ---
+TIMEOUT = 3.0
+BUFFER_SIZE = 4096
+ROUND_TIME = 30.0 # Duração da rodada em segundos
+GRID_W, GRID_H = 3, 3
+START_POS = (1, 1)
 
-# ACKs simples
 ACK0 = b'ACK0'
 ACK1 = b'ACK1'
 
-# --- Utilitários RDT ---
-def make_pkt(seq_num: int, data: bytes) -> bytes:
-    """Cria um pacote com bit de sequência: b'0|payload' ou b'1|payload'."""
-    return str(seq_num).encode() + b'|' + data
+# --- RDT Utils ---
+def make_pkt(seq, data):
+    # Empacota: "0|Dados" ou "1|Dados"
+    return str(seq).encode() + b'|' + data
 
-def extract_pkt(packet: bytes):
-    """Extrai (seq_num, data). Se não houver '|', retorna (None, packet)."""
+def extract_pkt(packet):
+    # Tenta separar pelo pipe '|'
     sep = packet.find(b'|')
-    if sep == -1:
-        return None, packet
+    if sep == -1: return None, packet
     try:
-        seq = int(packet[:sep].decode())
-        data = packet[sep+1:]
-        return seq, data
-    except Exception:
+        return int(packet[:sep].decode()), packet[sep+1:]
+    except:
         return None, packet
 
-def make_ack_bytes(seq_num: int) -> bytes:
-    return ACK0 if seq_num == 0 else ACK1
+def make_ack(seq):
+    return ACK0 if seq == 0 else ACK1
 
-def simulate_loss() -> bool:
-    """Simula perda no envio para testar robustez. Pode ser desativada com PROB_PERDA = 0."""
-    return random.random() < PROB_PERDA
+# --- Estado do Servidor ---
+HOST = "127.0.0.1"
+PORT = 62451 
 
-# --- Estado do servidor ---
-HOST = "0.0.0.0"
-PORT = 5000
+server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+server.bind((HOST, PORT))
+print(f"Servidor HuntCin iniciado em {HOST}:{PORT}")
 
-servidor = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-servidor.bind((HOST, PORT))
-servidor.settimeout(0.5)  # timeout curto para permitir checagens periódicas
+# Cadeado (RLock) pra evitar que threads mexam na lista de clientes ao mesmo tempo
+clients_lock = threading.RLock()
 
-clients_lock = threading.Lock()
-# clients: chave = (ip, port) ; valor = dict com infos do cliente
-clients = {}
-
-# pontuação acumulada por nome
+clients = {} 
 player_scores = {}
-
-# estado de rodada
-round_lock = threading.Lock()
-current_treasure = None
-round_number = 0
 running = True
+current_treasure = None 
 
-# --- Funções que operam por cliente ---
-def ensure_client_state(addr):
-    """Garante que exista dicionário de estado para um client (endereço)."""
+def ensure_client(addr):
+    # Garante que o cliente existe no dicionário antes de tentar acessar
     with clients_lock:
         if addr not in clients:
             clients[addr] = {
                 "name": None,
-                "expected_seq_recv": 0,   # bit esperado ao receber deste cliente
-                "next_seq_send": 0,      # bit a ser usado para enviar para este cliente
                 "pos": START_POS,
                 "online": False,
                 "hint_used": False,
                 "suggest_used": False,
-                "last_command": None,    # comando enviado na rodada atual
-                "last_active": time.time(),
-                "ack_events": {0: threading.Event(), 1: threading.Event()},
+                "last_command": None,
+                "expected_seq_recv": 0, # O que espera receber (0 ou 1)
+                "next_seq_send": 0, # O que vai enviar (0 ou 1)
+                "ack_events": {0: threading.Event(), 1: threading.Event()} # Gatilhos pra acordar a thread
             }
 
-def reliable_send(addr, message_str):
-    """
-    Envia message_str (str) de forma confiável para client addr usando RDT stop-and-wait.
-    Usa per-client alternating bit e um Event que é sinalizado pela thread de recebimento
-    quando chega o ACK correspondente.
-    """
-    ensure_client_state(addr)
-    payload = message_str.encode()
-    while True:
-        with clients_lock:
-            client = clients.get(addr)
-            if client is None:
-                print(f"[RDT-ENVIAR] Cliente {addr} não existe mais, abortando envio.")
-                return False
-            seq = client["next_seq_send"]
-            ack_event = client["ack_events"][seq]
-            ack_event.clear()
+def reliable_send(addr, msg_str):
+    """Envia mensagem RDT para o cliente e aguarda ACK."""
+    ensure_client(addr)
+    payload = msg_str.encode()
+    
+    with clients_lock:
+        if addr not in clients: return False
+        seq = clients[addr]["next_seq_send"]
+        ack_ev = clients[addr]["ack_events"][seq]
+        ack_ev.clear() # Limpa o evento
 
-        pkt = make_pkt(seq, payload)
-
-        if simulate_loss():
-            print(f"  [SIMULAÇÃO] (server->{addr}) Pacote {seq} PERDIDO (mensagem: {message_str})")
-        else:
-            try:
-                servidor.sendto(pkt, addr)
-            except Exception as e:
-                print(f"[RDT-ENVIAR] Erro ao enviar para {addr}: {e}")
-
-        # aguarda ACK do cliente com retransmissão até TIMEOUT
-        got = ack_event.wait(TIMEOUT)
-        if got:
+    pkt = make_pkt(seq, payload)
+    
+    for i in range(5): 
+        try:
+            server.sendto(pkt, addr)
+        except:
+            pass
+            
+        if ack_ev.wait(TIMEOUT):
             with clients_lock:
-                client = clients.get(addr)
-                if client:
-                    client["next_seq_send"] = 1 - client["next_seq_send"]
-                    client["last_active"] = time.time()
+                if addr in clients:
+                    # Recebeu ACK! Inverte o bit (0->1 ou 1->0) pra proxima msg
+                    clients[addr]["next_seq_send"] = 1 - seq
             return True
-        else:
-            print(f"  [RDT-ENVIAR] Timeout esperando ACK{seq} de {addr}. Reenviando...")
+        print(f"[RDT] Timeout aguardando ACK{seq} de {addr} (Tentativa {i+1})")
+    
+    print(f"[RDT] Falha de envio para {addr}. Cliente pode estar offline.")
+    return False
 
-def send_ack_immediate(addr, seq_num):
-    """Envia um ACK simples (pode ser perdido). Usado pelo receptor para confirmar pkt recebido."""
-    ack = make_ack_bytes(seq_num)
-    if simulate_loss():
-        print(f"  [SIMULAÇÃO] (server->{addr}) ACK{seq_num} PERDIDO")
-    else:
-        servidor.sendto(ack, addr)
-
-# --- Recepção: thread que processa tudo que chega ao socket ---
 def receiver_thread():
-    """
-    Loop que recebe todos os pacotes UDP e faz:
-    - se for ACK (ACK0/ACK1) => sinaliza o evento de ack do cliente correspondente
-    - se for dado com header 'bit|payload' => processa de acordo com expected_seq_recv do cliente
-    """
-    global running
-    print(f"[RECEPTOR] Thread de recepção iniciada na porta {PORT}.")
+    """Fica ouvindo a porta UDP o tempo todo."""
+    print("[THREAD] Receptor RDT iniciado.")
     while running:
         try:
-            packet, addr = servidor.recvfrom(BUFFER_SIZE)
-        except socket.timeout:
+            packet, addr = server.recvfrom(BUFFER_SIZE)
+        except:
             continue
-        except Exception as e:
-            print(f"[RECEPTOR] Erro recvfrom: {e}")
-            continue
-
-        ensure_client_state(addr)
-
-        # se for ACK puro (ACK0/ACK1)
+        
+        ensure_client(addr)
+        
+        # 1. É ACK?
         if packet == ACK0 or packet == ACK1:
             bit = 0 if packet == ACK0 else 1
             with clients_lock:
-                client = clients.get(addr)
-                if client:
-                    ev = client["ack_events"].get(bit)
-                    if ev:
-                        ev.set()
+                if addr in clients:
+                    # Acorda a função reliable_send que está travada no wait()
+                    clients[addr]["ack_events"][bit].set()
             continue
 
-        # caso contrário, tenta extrair pacote com header
+        # 2. É DADO?
         seq, data = extract_pkt(packet)
-        if seq is None:
-            print(f"[RECEPTOR] Pacote mal formatado de {addr}: {packet[:50]}...")
-            continue
+        if seq is not None:
+            # Envia ACK IMEDIATAMENTE
+            ack_pkt = make_ack(seq)
+            server.sendto(ack_pkt, addr)
 
-        with clients_lock:
-            client = clients.get(addr)
-            expected = client["expected_seq_recv"]
-
-        if seq == expected:
+            expected = 0
             with clients_lock:
-                client["expected_seq_recv"] = 1 - client["expected_seq_recv"]
-                client["last_active"] = time.time()
-            try:
-                msg = data.decode()
-            except Exception:
-                msg = ""
-            print(f"[RECEPTOR] De {addr} (seq={seq}): {msg}")
-            send_ack_immediate(addr, seq)
-            threading.Thread(target=handle_application_message, args=(addr, msg), daemon=True).start()
-        else:
-            print(f"[RECEPTOR] De {addr}: pacote seq={seq} duplicado/fora de ordem (esperado={expected}). Reenviando ACK do anterior.")
-            send_ack_immediate(addr, 1 - expected)
-
-# --- Lógica de aplicação: login/logout, comandos do jogo ---
-def broadcast_message(message):
-    """Envia message para todos os clientes online (reliable send por cliente)."""
-    with clients_lock:
-        addrs = [a for a, c in clients.items() if c["online"]]
-    for addr in addrs:
-        threading.Thread(target=reliable_send, args=(addr, message), daemon=True).start()
-
-def handle_application_message(addr, msg):
-    """
-    Mensagens que o servidor espera dos clientes (strings):
-      - login <nome>
-      - logout
-      - move <up/down/left/right>
-      - hint
-      - suggest
-    Respostas de controle são enviadas via reliable_send (RDT).
-    """
-    ensure_client_state(addr)
-    parts = msg.strip().split()
-    if len(parts) == 0:
-        return
-    cmd = parts[0].lower()
-
-    if cmd == "login" and len(parts) >= 2:
-        nome = " ".join(parts[1:]).strip()
-        with clients_lock:
-            nomes = [c["name"] for c in clients.values() if c["online"] and c["name"]]
-            if nome in nomes:
-                print(f"[LOGIN] Tentativa de login com nome já existente: {nome} por {addr}")
-                reliable_send(addr, f"ERRO: nome '{nome}' já está em uso.")
-                return
-            clients[addr]["name"] = nome
-            clients[addr]["online"] = True
-            clients[addr]["pos"] = START_POS
-            clients[addr]["hint_used"] = False
-            clients[addr]["suggest_used"] = False
-            clients[addr]["last_command"] = None
-            clients[addr]["last_active"] = time.time()
-            player_scores.setdefault(nome, 0)
-        print(f"[LOGIN] '{nome}' conectado de {addr}.")
-        reliable_send(addr, "você está online!")
-        broadcast_message(f"[Servidor] {nome}:{addr[1]} entrou no jogo.")
-
-    elif cmd == "logout":
-        with clients_lock:
-            name = clients[addr]["name"]
-            clients[addr]["online"] = False
-            clients[addr]["last_command"] = None
-        print(f"[LOGOUT] {name} ({addr}) desconectou.")
-        reliable_send(addr, "logout efetuado.")
-        broadcast_message(f"[Servidor] {name}:{addr[1]} saiu do jogo.")
-
-    elif cmd == "move" and len(parts) == 2:
-        direction = parts[1].lower()
-        with clients_lock:
-            if not clients[addr]["online"]:
-                reliable_send(addr, "ERRO: você precisa estar online para mover.")
-                return
-            clients[addr]["last_command"] = f"move {direction}"
-            clients[addr]["last_active"] = time.time()
-        reliable_send(addr, f"Comando recebido: move {direction}")
-
-    elif cmd == "hint":
-        with clients_lock:
-            if not clients[addr]["online"]:
-                reliable_send(addr, "ERRO: precisa estar online para pedir hint.")
-                return
-            if clients[addr]["hint_used"]:
-                reliable_send(addr, "ERRO: você já usou sua dica nesta partida.")
-                return
-            clients[addr]["hint_used"] = True
-        with round_lock:
-            if current_treasure is None:
-                reliable_send(addr, "ERRO: sem jogo em andamento.")
-                return
-            tx, ty = current_treasure
-        px, py = clients[addr]["pos"]
-        if ty > py:
-            texto = "O tesouro está mais acima."
-        elif ty < py:
-            texto = "O tesouro está mais abaixo."
-        elif tx > px:
-            texto = "O tesouro está mais à direita."
-        elif tx < px:
-            texto = "O tesouro está mais à esquerda."
-        else:
-            texto = "O tesouro está exatamente na sua posição!"
-        reliable_send(addr, texto)
-
-    elif cmd == "suggest":
-        with clients_lock:
-            if not clients[addr]["online"]:
-                reliable_send(addr, "ERRO: precisa estar online para pedir suggestion.")
-                return
-            if clients[addr]["suggest_used"]:
-                reliable_send(addr, "ERRO: você já usou sua sugestão nesta partida.")
-                return
-            clients[addr]["suggest_used"] = True
-        with round_lock:
-            if current_treasure is None:
-                reliable_send(addr, "ERRO: sem jogo em andamento.")
-                return
-            tx, ty = current_treasure
-        px, py = clients[addr]["pos"]
-        suggestion = None
-        if ty > py:
-            suggestion = "move up"
-        elif ty < py:
-            suggestion = "move down"
-        elif tx > px:
-            suggestion = "move right"
-        elif tx < px:
-            suggestion = "move left"
-        else:
-            suggestion = "Você já está no tesouro!"
-        reliable_send(addr, f"Sugestão: {suggestion}")
-
-    else:
-        reliable_send(addr, "ERRO: comando inválido ou formato incorreto.")
-
-# --- Funções de jogo (controle de rodada e validação de movimento) ---
-def random_treasure_position():
-    """Sorteia posição do tesouro entre (1..3,1..3) exceto START_POS."""
-    while True:
-        x = random.randint(1, GRID_W)
-        y = random.randint(1, GRID_H)
-        if (x, y) != START_POS:
-            return (x, y)
-
-def validate_and_apply_move(name_addr_pair, direction):
-    """Valida e aplica o movimento se dentro do grid."""
-    addr, name = name_addr_pair
-    with clients_lock:
-        client = clients.get(addr)
-        if not client or not client["online"]:
-            return f"{name} não está online."
-        px, py = client["pos"]
-
-    dx = dy = 0
-    if direction == "up":
-        dy = 1
-    elif direction == "down":
-        dy = -1
-    elif direction == "left":
-        dx = -1
-    elif direction == "right":
-        dx = 1
-    else:
-        return f"{name}: comando de movimento inválido."
-
-    nx, ny = px + dx, py + dy
-    if not (1 <= nx <= GRID_W and 1 <= ny <= GRID_H):
-        return f"{name}: movimento fora do grid. Posição permanece ({px},{py})."
-    with clients_lock:
-        clients[addr]["pos"] = (nx, ny)
-    return f"{name} movido para ({nx},{ny})."
-
-def round_loop():
-    """Loop que executa rodadas sequenciais do jogo enquanto running==True."""
-    global current_treasure, round_number
-    print("[JOGO] Iniciando loop de rodadas.")
-    while running:
-        round_number += 1
-        with round_lock:
-            current_treasure = random_treasure_position()
-        print(f"[JOGO] Rodada {round_number} começando. Tesouro sorteado.")
-        with clients_lock:
-            for c in clients.values():
-                c["last_command"] = None
-        broadcast_message(f"[Servidor] Início da rodada {round_number}! Envie seu movimento em {ROUND_TIME} segundos.")
-        start = time.time()
-        while time.time() - start < ROUND_TIME:
-            time.sleep(0.2)
-        print(f"[JOGO] Rodada {round_number} encerrando. Processando comandos.")
-        eliminados = []
-        resultados = []
-        winners = []
-        with clients_lock:
-            active_clients = [(addr, c["name"]) for addr, c in clients.items() if c["online"]]
-        for addr, name in active_clients:
-            with clients_lock:
-                cmd = clients[addr]["last_command"]
-            if cmd is None:
-                eliminados.append((addr, name))
+                expected = clients[addr]["expected_seq_recv"]
+            
+            # Só processa se for a sequência exata que esperava (evita duplicatas)
+            if seq == expected:
+                with clients_lock:
+                    clients[addr]["expected_seq_recv"] = 1 - expected
+                
+                try:
+                    msg = data.decode()
+                    # Processa em thread separada para não bloquear o receptor
+                    threading.Thread(target=handle_msg, args=(addr, msg), daemon=True).start()
+                except:
+                    pass
             else:
-                if cmd.startswith("move"):
-                    _, direction = cmd.split(maxsplit=1)
-                    res = validate_and_apply_move((addr, name), direction)
-                    resultados.append(res)
-        with clients_lock:
-            estado = ", ".join([f"{c['name']}({c['pos'][0]},{c['pos'][1]})"
-                                for c in clients.values() if c["online"]])
-        broadcast_message(f"[Servidor] Estado atual: {estado}")
-        with clients_lock:
-            for addr, c in clients.items():
-                if c["online"] and c["pos"] == current_treasure:
-                    winners.append((addr, c["name"]))
-        if winners:
-            for addr, name in winners:
-                msg = f"O jogador {name}:{addr[1]} encontrou o tesouro na posição {current_treasure}!"
-                print(f"[JOGO] {msg}")
-                broadcast_message(f"[Servidor] {msg}")
-                player_scores[name] = player_scores.get(name, 0) + 1
-            broadcast_message(f"[Servidor] Placar parcial: {player_scores}")
-            time.sleep(2)
-        else:
-            if eliminados:
-                names_el = ", ".join([n for (_, n) in eliminados])
-                broadcast_message(f"[Servidor] Eliminados desta rodada: {names_el}")
-            for r in resultados:
-                broadcast_message(f"[Servidor] {r}")
-            time.sleep(1)
+                # Se for duplicado, o ACK já foi enviado acima. Apenas ignoramos o processamento.
+                pass
 
-# --- Inicialização ---
-if __name__ == "__main__":
-    print("Servidor HuntCin (RDT 3.0) iniciando.")
-    print(f"Aguardando clientes em {HOST}:{PORT} ...")
-    t = threading.Thread(target=receiver_thread, daemon=True)
-    t.start()
-    game_thread = threading.Thread(target=round_loop, daemon=True)
-    game_thread.start()
+def get_hint_text(px, py, tx, ty):
+    if ty > py: return "O tesouro está mais acima."
+    if ty < py: return "O tesouro está mais abaixo."
+    if tx > px: return "O tesouro está mais à direita."
+    if tx < px: return "O tesouro está mais à esquerda."
+    return "Você está em cima do tesouro!"
+
+def get_suggestion_text(px, py, tx, ty):
+    # Retorna tupla: (direção, distancia)
+    if ty > py: return "move up", ty - py
+    if ty < py: return "move down", py - ty
+    if tx > px: return "move right", tx - px
+    if tx < px: return "move left", px - tx
+    return None, 0
+
+def handle_msg(addr, msg):
+    """Processa a lógica do jogo."""
+    global current_treasure
+    
+    # PEQUENO DELAY CRÍTICO: Dá tempo do cliente receber o ACK do comando
+    # antes de recebermos a resposta do servidor.
+    time.sleep(0.1) 
 
     try:
-        while True:
-            cmd = input("Comando servidor (type 'quit' to stop): ").strip().lower()
-            if cmd == "quit":
-                print("Encerrando servidor...")
-                running = False
-                break
-            elif cmd == "clients":
-                with clients_lock:
-                    for addr, c in clients.items():
-                        print(f"{addr} -> {c}")
-            elif cmd == "scores":
-                print("Placar:", player_scores)
-            else:
-                print("Comando desconhecido. Use 'quit', 'clients' ou 'scores'.")
-    except KeyboardInterrupt:
-        print("KeyboardInterrupt: encerrando.")
-        running = False
+        parts = msg.strip().split()
+        if not parts: return
+        cmd = parts[0].lower()
+        
+        print(f"[CMD] {addr}: {msg}")
 
-    time.sleep(1.0)
-    servidor.close()
-    print("Servidor finalizado.")
+        # --- LOGIN ---
+        if cmd == "login":
+            if len(parts) < 2:
+                reliable_send(addr, "ERRO: Use login <nome>")
+                return
+            nome = " ".join(parts[1:]).strip()
+            
+            online = False
+            with clients_lock:
+                online = clients[addr]["online"]
+
+            if online:
+                reliable_send(addr, "ERRO: Você já está logado.")
+                return
+
+            with clients_lock:
+                for c in clients.values():
+                    if c["online"] and c["name"] == nome:
+                        reliable_send(addr, f"ERRO: O nome '{nome}' já está em uso.")
+                        return
+
+                clients[addr]["name"] = nome
+                clients[addr]["online"] = True
+                clients[addr]["pos"] = START_POS
+                player_scores.setdefault(nome, 0)
+            
+            reliable_send(addr, "LOGIN SUCESSO: Você está online!")
+            broadcast(f"[Servidor] {nome} entrou no jogo.")
+
+        # --- LOGOUT ---
+        elif cmd == "logout":
+            online = False
+            with clients_lock:
+                online = clients[addr]["online"]
+
+            if not online:
+                reliable_send(addr, "ERRO: Você não está logado.")
+                return
+            
+            name = None
+            with clients_lock:
+                name = clients[addr]["name"]
+                clients[addr]["online"] = False
+            reliable_send(addr, "logout efetuado")
+            if name: broadcast(f"[Servidor] {name} saiu do jogo.")
+
+        # --- MOVE ---
+        elif cmd == "move":
+            # VALIDAÇÃO NO SERVIDOR
+            online = False
+            with clients_lock:
+                online = clients[addr]["online"]
+            
+            if not online:
+                reliable_send(addr, "ERRO: Faça login primeiro.")
+                return
+
+            direction = parts[1].lower() if len(parts) > 1 else ""
+            if direction not in ["up", "down", "left", "right"]:
+                reliable_send(addr, "ERRO: Direção inválida.")
+                return
+
+            with clients_lock:
+                clients[addr]["last_command"] = f"move {direction}"
+            # O servidor não responde imediatamente ao move (só ACK), espera a rodada.
+
+        # --- HINT ---
+        elif cmd == "hint":
+            online = False
+            with clients_lock:
+                online = clients[addr]["online"]
+
+            if not online:
+                reliable_send(addr, "ERRO: Faça login primeiro.")
+                return
+            
+            used = False
+            with clients_lock:
+                if clients[addr]["hint_used"]: used = True
+                else: clients[addr]["hint_used"] = True
+                
+            if used:
+                reliable_send(addr, "ERRO: Você já usou sua dica nesta partida.")
+                return
+
+            px, py = (0,0)
+            with clients_lock: px, py = clients[addr]["pos"]
+
+            if current_treasure:
+                tx, ty = current_treasure
+                texto = get_hint_text(px, py, tx, ty)
+                reliable_send(addr, f"DICA: {texto}")
+            else:
+                reliable_send(addr, "ERRO: Jogo não iniciado.")
+
+        # --- SUGGEST ---
+        elif cmd == "suggest":
+            online = False
+            with clients_lock:
+                online = clients[addr]["online"]
+            
+            if not online:
+                reliable_send(addr, "ERRO: Faça login primeiro.")
+                return
+
+            used = False
+            with clients_lock:
+                if clients[addr]["suggest_used"]: used = True
+                else: clients[addr]["suggest_used"] = True
+
+            if used:
+                reliable_send(addr, "ERRO: Você já usou sua sugestão nesta partida.")
+                return
+
+            px, py = (0,0)
+            with clients_lock: px, py = clients[addr]["pos"]
+
+            if current_treasure:
+                tx, ty = current_treasure
+                # Pega a direção e a distância calculada
+                sug, dist = get_suggestion_text(px, py, tx, ty)
+                if sug:
+                    reliable_send(addr, f"Sugestão: {sug} {dist} casas.")
+                else:
+                    reliable_send(addr, "Sugestão: Você já está no tesouro!")
+            else:
+                reliable_send(addr, "ERRO: Jogo não iniciado.")
+
+    except Exception as e:
+        print(f"Erro processando msg de {addr}: {e}")
+        traceback.print_exc()
+
+def broadcast(msg):
+    targets = []
+    with clients_lock:
+        targets = [addr for addr, c in clients.items() if c["online"]]
+    
+    print(f"[BROADCAST] {msg}")
+    for t in targets:
+        # Manda em thread separada pra não travar o loop principal se um cliente demorar
+        threading.Thread(target=reliable_send, args=(t, msg), daemon=True).start()
+
+def reset_game_state():
+    global current_treasure
+    while True:
+        tx = random.randint(1, GRID_W)
+        ty = random.randint(1, GRID_H)
+        if (tx, ty) != START_POS:
+            current_treasure = (tx, ty)
+            break
+    
+    with clients_lock:
+        for c in clients.values():
+            c["pos"] = START_POS
+            c["hint_used"] = False
+            c["suggest_used"] = False
+            c["last_command"] = None
+
+def game_loop():
+    global round_num
+    round_num = 0
+    reset_game_state()
+    
+    print("[JOGO] Loop iniciado.")
+    while running:
+        round_num += 1
+        print(f"\n>>> RODADA {round_num} (Tesouro em {current_treasure})")
+        
+        with clients_lock:
+            for c in clients.values(): c["last_command"] = None
+        
+        # Avisa inicio da rodada
+        broadcast(f"[Servidor] Início da rodada {round_num}! Envie seu movimento em {ROUND_TIME} segundos.")
+        
+        time.sleep(ROUND_TIME)
+        
+        broadcast("[Servidor] Calculando resultados...")
+        
+        msgs_log = []
+        winners = []
+        
+        active_players = []
+        with clients_lock:
+            active_players = [(addr, c) for addr, c in clients.items() if c["online"]]
+        
+        for addr, client in active_players:
+            cmd = client["last_command"]
+            
+            if not cmd:
+                msgs_log.append(f"{client['name']} não enviou comando e foi eliminado desta rodada.")
+                continue
+            
+            if cmd.startswith("move"):
+                _, d = cmd.split()
+                px, py = client["pos"]
+                nx, ny = px, py
+                
+                if d == "up": ny += 1
+                elif d == "down": ny -= 1
+                elif d == "right": nx += 1
+                elif d == "left": nx -= 1
+                
+                if not (1 <= nx <= GRID_W and 1 <= ny <= GRID_H):
+                    msgs_log.append(f"{client['name']} bateu na parede em {client['pos']}.")
+                else:
+                    with clients_lock:
+                        clients[addr]["pos"] = (nx, ny)
+                    msgs_log.append(f"{client['name']} moveu para ({nx}, {ny}).")
+                    
+                    if (nx, ny) == current_treasure:
+                        winners.append((addr, client["name"]))
+
+        # Mostra onde todo mundo está
+        with clients_lock:
+            status_list = [f"{c['name']}{c['pos']}" for a, c in clients.items() if c["online"]]
+        
+        if status_list:
+            broadcast("[Servidor] Estado atual: " + ", ".join(status_list))
+        
+        for m in msgs_log:
+            broadcast(f"[Servidor] {m}")
+
+        if not winners: 
+            broadcast(f"[Servidor] Placar atual: {player_scores}")
+
+        if winners:
+            for w_addr, w_name in winners:
+                msg_win = f"O jogador <{w_name}:{w_addr[1]}> encontrou o tesouro na posição {current_treasure}!"
+                broadcast(msg_win)
+                player_scores[w_name] += 1
+                broadcast(f"[Servidor] Placar atual: {player_scores}")
+            
+            broadcast("[Servidor] Nova partida em 5 segundos...")
+            time.sleep(5)
+            reset_game_state()
+        
+
+if __name__ == "__main__":
+    t_recv = threading.Thread(target=receiver_thread, daemon=True)
+    t_recv.start()
+    t_game = threading.Thread(target=game_loop, daemon=True)
+    t_game.start()
+    
+    try:
+        while True: time.sleep(1)
+    except KeyboardInterrupt:
+        running = False
+        server.close()
+        print("Servidor encerrado.")
