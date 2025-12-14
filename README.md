@@ -157,8 +157,7 @@ rodando em linha de comando com comunicação UDP e transmissão confiável impl
 ```
 HuntCin/
 ├── client.py
-├── server.py
-└── README.md
+└── server.py
 ```
 
 ## Como usar (execução local / testes)
